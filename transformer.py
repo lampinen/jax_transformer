@@ -291,8 +291,9 @@ if __name__ == "__main__":
                                       num_ints=num_symbols, seq_length=seq_length)
 
     params = get_params(opt_state)
-    print("Epoch: {}, Train (subset) accuracy: {}, test_accuracy: {}".format(
+    print("Epoch: {}, Train (subset) loss: {}, Train (subset) accuracy: {}, test_accuracy: {}".format(
         0, 
+        loss(params, (dataset["train"]["inputs"][-num_test:, :], dataset["train"]["outputs"][-num_test:, :])),
         get_accuracy(params, dataset["train"]["inputs"][-num_test:, :], dataset["train"]["outputs"][-num_test:, :]),
         get_accuracy(params, dataset["test"]["inputs"], dataset["test"]["outputs"])))
 
@@ -304,7 +305,9 @@ if __name__ == "__main__":
                  dataset["train"]["outputs"][batch_i * batch_size: (batch_i + 1) * batch_size:, :]))
             batch_count += 1
 
-        print("Epoch: {}, Train (subset) accuracy: {}, test_accuracy: {}".format(
+        params = get_params(opt_state)
+        print("Epoch: {}, Train (subset) loss: {}, Train (subset) accuracy: {}, test_accuracy: {}".format(
             epoch_i, 
+            loss(params, (dataset["train"]["inputs"][-num_test:, :], dataset["train"]["outputs"][-num_test:, :])),
             get_accuracy(params, dataset["train"]["inputs"][-num_test:, :], dataset["train"]["outputs"][-num_test:, :]),
             get_accuracy(params, dataset["test"]["inputs"], dataset["test"]["outputs"])))
