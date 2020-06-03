@@ -221,7 +221,7 @@ def init_transformer_params(init_scale, num_encoder_layers, num_decoder_layers,
         ob = init_scale * rng.randn(dimensionality)
         out_2_params = (ow, ob) 
 
-        w1 = init_scale * rng.randn(num_heads * head_dimensionality, dimensionality)  
+        w1 = init_scale * rng.randn(dimensionality, dimensionality)  
         b1 = init_scale * rng.randn(dimensionality)
         w2 = init_scale * rng.randn(dimensionality, dimensionality)  
         b2 = init_scale * rng.randn(dimensionality)
