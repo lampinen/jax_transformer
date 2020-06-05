@@ -259,6 +259,14 @@ if __name__ == "__main__":
     learning_rate = 1e-4
     num_epochs = 100000
 
+#    # larger model, longer sequence test
+#    seq_length = 10
+#    num_encoder_layers = 6
+#    num_decoder_layers = 6
+#    dimensionality = 256
+#    num_heads = 4
+#    head_dimensionality = 64
+
     init_params = init_transformer_params(
         init_scale, num_encoder_layers, num_decoder_layers, dimensionality,
         num_heads, head_dimensionality, num_symbols) 
@@ -296,6 +304,8 @@ if __name__ == "__main__":
         loss(params, (dataset["train"]["inputs"][-num_test:, :], dataset["train"]["outputs"][-num_test:, :])),
         get_accuracy(params, dataset["train"]["inputs"][-num_test:, :], dataset["train"]["outputs"][-num_test:, :]),
         get_accuracy(params, dataset["test"]["inputs"], dataset["test"]["outputs"])))
+    print(dataset["test"]["inputs"][:5, :])
+    print(get_predictions(params, dataset["test"]["inputs"][:5, :]))
 
     batch_count = 0
     for epoch_i in range(1, num_epochs):
@@ -311,3 +321,5 @@ if __name__ == "__main__":
             loss(params, (dataset["train"]["inputs"][-num_test:, :], dataset["train"]["outputs"][-num_test:, :])),
             get_accuracy(params, dataset["train"]["inputs"][-num_test:, :], dataset["train"]["outputs"][-num_test:, :]),
             get_accuracy(params, dataset["test"]["inputs"], dataset["test"]["outputs"])))
+        print(dataset["test"]["inputs"][:5, :])
+        print(get_predictions(params, dataset["test"]["inputs"][:5, :]))
