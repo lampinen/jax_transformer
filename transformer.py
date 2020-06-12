@@ -44,7 +44,7 @@ def single_attention_head(params, inputs, Q_inputs=None, mask=None):
     K = jnp.dot(inputs, kw)
     V = jnp.dot(inputs, vw)
 
-    scale = jnp.sqrt(inputs.shape[-1])
+    scale = jnp.sqrt(K.shape[-1])
 
     attention_selections = jnp.matmul(Q, jnp.transpose(K, axes=[0,2,1])) / scale
 
