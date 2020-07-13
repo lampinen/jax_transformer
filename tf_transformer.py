@@ -89,7 +89,7 @@ def multi_head_attention(inputs, scope, Q_inputs=None, num_heads=4,
             results.append(single_attention_head(inputs, Q_inputs=Q_inputs,
                                                  scope="head_%i" % head_i, 
                                                  head_size=head_size,
-                                                 reuse=reuse)[0])
+                                                 reuse=reuse))
 
         result_values = tf.concat([x[0] for x in results], axis=-1)
 
