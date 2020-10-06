@@ -8,6 +8,21 @@ def softmax_xe(logits, labels):
     return -jnp.sum(jax.nn.log_softmax(logits) * labels, axis=-1)
 
 
+class LayerNorm(hk.Module):
+    def __call__(self, inputs):
+        mean = jnp.mean(inputs, axis=-1, keepdims=True)
+        results = inputs - mean
+        sd = jnp.std(results, axis=-1, keepdims=True)
+        results /= sd
+
+        param_shapes = [1] * (len(results.shape) - 1) + [results.shape[-1]]
+        gain = hk.get_parameter("gain", shape=param_shapes, init=jnp.ones)
+        bias = hk.get_parameter("bias", shape=param_shapes, init=jnp.zeros)
+
+        results = results * gain + bias
+        return results
+
+
 class SingleAttentionHead(hk.Module):
     def __init__(self, dimensionality, name=None):
         super(SingleAttentionHead, self).__init__(name=name)
@@ -34,10 +49,56 @@ class SingleAttentionHead(hk.Module):
 
         return outputs
 
-class AndrewsTransformer(hk.Module):
-    def __init__(self, dimensionality, name=None):
-        super(AndrewsTransformer, self).__init__(name=name)
+
+class MultiHeadAttention(hk.Module):
+    def __init__(self, dimensionality, num_heads, name=None):
+        assert(dimensionality % num_heads == 0)
+        super(MultiHeadAttention, self).__init__(name=name)
         self.dimensionality = dimensionality
+        self.num_heads = num_heads 
+        self.head_dim = dimensionality // num_heads
+
+    def __call__(self, inputs, Q_inputs=None):
+        results = []
+        for head_i in range(self.num_heads):
+            results.append(
+                SingleAttentionHead(self.head_dim)(inputs=inputs, Q_inputs=Q_inputs)
+            )
+        results = jnp.concatenate(results, axis=-1)
+        results = hk.Linear(self.dimensionality)(results) 
+        return results
+
+
+class EncoderLayer(hk.Module):
+    def __init__(self, dimensionality, num_heads, name=None):
+        super(EncoderLayer, self).__init__(name=name)
+        self.dimensionality = dimensionality
+        self.num_heads = num_heads 
+
+    def __call__(self, inputs, Q_inputs=None):
+        dimensionality = self.dimensionality
+        results = inputs
+        results += MultiHeadAttention(
+            dimensionality=dimensionality,
+            num_heads=self.num_heads)(results)
+        results = LayerNorm()(results)
+
+        ff = hk.Sequential([hk.Linear(dimensionality), 
+                            jax.nn.relu, 
+                            hk.Linear(dimensionality)])
+        results += ff(results) 
+        results = LayerNorm()(results)
+        return results
+
+
+class AndrewsTransformer(hk.Module):
+    def __init__(self, transformer_config, name=None):
+        super(AndrewsTransformer, self).__init__(name=name)
+        self.config = transformer_config
+        self.dimensionality = transformer_config["dimensionality"]
+        self.num_heads = transformer_config["num_heads"]
+        self.num_encoder_layers = transformer_config["num_encoder_layers"]
+        self.num_decoder_layers = transformer_config["num_decoder_layers"]
 
     def __call__(self, inputs):
         dimensionality = self.dimensionality
@@ -46,18 +107,34 @@ class AndrewsTransformer(hk.Module):
         embedding = hk.Linear(dimensionality)
         embedded_inputs = embedding(one_hot)
 
-        # testing, replace
-        att1 = SingleAttentionHead(dimensionality)
-        results = att1(embedded_inputs)
+        encoded_inputs = embedded_inputs
+        
+        for layer_i in range(self.num_encoder_layers):
+            encoded_inputs = EncoderLayer(
+                dimensionality=dimensionality,
+                num_heads=self.num_heads)(encoded_inputs)
+
+        # testing, to be updated
+        results = encoded_inputs
+
         return results
+
 
 if __name__ == "__main__":
     #### Params
+    # dataset
     num_ints = 11
     seq_length = 7
     num_train = 1000
     num_test = 100
-    dimensionality = 128
+
+    # architecture
+    transformer_config = {
+        "dimensionality": 128,
+        "num_heads": 4,
+        "num_encoder_layers": 3,
+        "num_decoder_layers": 3,
+    }
     #### 
 
     rng = jax.random.PRNGKey(0)
@@ -70,11 +147,12 @@ if __name__ == "__main__":
     batch_inputs = dataset["train"]["inputs"][:5]
 
     def model_forward_fn(inputs):
-        model = AndrewsTransformer(dimensionality=dimensionality) 
+        model = AndrewsTransformer(transformer_config=transformer_config) 
         return model(inputs)
 
     forward = hk.transform(model_forward_fn)
     params = forward.init(rng, batch_inputs)
+    print(params.keys())
     results = forward.apply(params, None, batch_inputs)
     print(results)
     print(results.shape)
