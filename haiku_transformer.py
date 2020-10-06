@@ -1,11 +1,24 @@
 import haiku as hk
 import jax
 import jax.numpy as jnp
+import numpy as np
 import datasets
 
 
 def softmax_xe(logits, labels):
     return -jnp.sum(jax.nn.log_softmax(logits) * labels, axis=-1)
+
+
+def positional_encodings(length, dimensionality, constant_fac=1000):
+    positions = jnp.arange(length, dtype=jnp.float32)
+    constants = (2./dimensionality) * (jnp.arange(dimensionality, dtype=jnp.float32) // 2.)
+    constants = 1./jnp.exp(constants * jnp.log(constant_fac))
+    offsets = jnp.zeros_like(constants)
+    offsets = jax.ops.index_update(offsets, jax.ops.index[::2], jnp.pi / 2.)  # sin -> cos 
+    encodings = jnp.outer(positions, constants)
+    encodings += offsets
+    encodings = jnp.sin(encodings)
+    return encodings
 
 
 class LayerNorm(hk.Module):
@@ -24,9 +37,10 @@ class LayerNorm(hk.Module):
 
 
 class SingleAttentionHead(hk.Module):
-    def __init__(self, dimensionality, name=None):
+    def __init__(self, dimensionality, causal_mask=False, name=None):
         super(SingleAttentionHead, self).__init__(name=name)
         self.dimensionality = dimensionality
+        self.causal_mask = causal_mask
 
     def __call__(self, inputs, Q_inputs=None):
         dimensionality = self.dimensionality
@@ -42,6 +56,10 @@ class SingleAttentionHead(hk.Module):
         
         attention_weights = jnp.matmul(
             Q, jnp.transpose(K, axes=[0,2,1])) / attention_scale
+        if self.causal_mask: # can't attend to later times
+            mask = np.tril(np.ones(attention_weights.shape[-2:]))
+            mask = np.expand_dims(mask, axis=0)
+            attention_weights = attention_weights * mask - 1e10 * (1 - mask)
             
         attention_weights = jax.nn.softmax(attention_weights, axis=-1)
 
@@ -51,19 +69,20 @@ class SingleAttentionHead(hk.Module):
 
 
 class MultiHeadAttention(hk.Module):
-    def __init__(self, dimensionality, num_heads, name=None):
+    def __init__(self, dimensionality, num_heads, causal_mask=False, name=None):
         assert(dimensionality % num_heads == 0)
         super(MultiHeadAttention, self).__init__(name=name)
         self.dimensionality = dimensionality
         self.num_heads = num_heads 
         self.head_dim = dimensionality // num_heads
+        self.causal_mask = causal_mask
 
     def __call__(self, inputs, Q_inputs=None):
         results = []
         for head_i in range(self.num_heads):
-            results.append(
-                SingleAttentionHead(self.head_dim)(inputs=inputs, Q_inputs=Q_inputs)
-            )
+            results.append(SingleAttentionHead(
+                self.head_dim, causal_mask=self.causal_mask)(
+                    inputs=inputs, Q_inputs=Q_inputs))
         results = jnp.concatenate(results, axis=-1)
         results = hk.Linear(self.dimensionality)(results) 
         return results
@@ -75,12 +94,40 @@ class EncoderLayer(hk.Module):
         self.dimensionality = dimensionality
         self.num_heads = num_heads 
 
-    def __call__(self, inputs, Q_inputs=None):
+    def __call__(self, inputs):
         dimensionality = self.dimensionality
         results = inputs
         results += MultiHeadAttention(
             dimensionality=dimensionality,
             num_heads=self.num_heads)(results)
+        results = LayerNorm()(results)
+
+        ff = hk.Sequential([hk.Linear(dimensionality), 
+                            jax.nn.relu, 
+                            hk.Linear(dimensionality)])
+        results += ff(results) 
+        results = LayerNorm()(results)
+        return results
+
+
+class DecoderLayer(hk.Module):
+    def __init__(self, dimensionality, num_heads, name=None):
+        super(DecoderLayer, self).__init__(name=name)
+        self.dimensionality = dimensionality
+        self.num_heads = num_heads 
+
+    def __call__(self, encoder_outputs, inputs):
+        dimensionality = self.dimensionality
+        results = inputs
+        results += MultiHeadAttention(
+            dimensionality=dimensionality,
+            num_heads=self.num_heads,
+            causal_mask=True)(results)
+        results = LayerNorm()(results)
+
+        results += MultiHeadAttention(
+            dimensionality=dimensionality,
+            num_heads=self.num_heads)(inputs=encoder_outputs, Q_inputs=results)
         results = LayerNorm()(results)
 
         ff = hk.Sequential([hk.Linear(dimensionality), 
@@ -97,27 +144,106 @@ class AndrewsTransformer(hk.Module):
         self.config = transformer_config
         self.dimensionality = transformer_config["dimensionality"]
         self.num_heads = transformer_config["num_heads"]
+        self.num_symbols = transformer_config["num_symbols"]
         self.num_encoder_layers = transformer_config["num_encoder_layers"]
         self.num_decoder_layers = transformer_config["num_decoder_layers"]
+        self.output_seq_length = transformer_config["output_seq_length"]
 
-    def __call__(self, inputs):
+    def __call__(self, inputs, targets=None, train_forced=True):
         dimensionality = self.dimensionality
-        one_hot = jax.nn.one_hot(inputs, num_classes=num_ints)
+        num_symbols = self.num_symbols
+        batch_size, input_seq_length = inputs.shape
+
+        # input handling
+        oh_inputs = jax.nn.one_hot(inputs, num_classes=num_symbols)
 
         embedding = hk.Linear(dimensionality)
-        embedded_inputs = embedding(one_hot)
+        embedded_inputs = embedding(oh_inputs)
 
-        encoded_inputs = embedded_inputs
+        input_position_embeddings = positional_encodings(
+            input_seq_length, dimensionality)
+        encoder_outputs = embedded_inputs + input_position_embeddings
+
+        # encoder stack
         
         for layer_i in range(self.num_encoder_layers):
-            encoded_inputs = EncoderLayer(
+            encoder_outputs = EncoderLayer(
                 dimensionality=dimensionality,
-                num_heads=self.num_heads)(encoded_inputs)
+                num_heads=self.num_heads)(encoder_outputs)
 
-        # testing, to be updated
-        results = encoded_inputs
+        # target handling
+        if targets is not None:
+            oh_targets = jax.nn.one_hot(targets, num_classes=num_symbols)
 
-        return results
+        # decoder stack
+        start_token = hk.get_parameter(
+            "start", shape=[1, 1, dimensionality],
+            init=hk.initializers.TruncatedNormal(1. / np.sqrt(dimensionality)))
+        start_token = jnp.tile(start_token, [batch_size, 1, 1])
+
+        output_embedding = hk.Linear(dimensionality)
+        
+        decoder_layers = [
+            DecoderLayer( 
+                dimensionality=dimensionality,
+                num_heads=self.num_heads) for layer_i in range(self.num_decoder_layers)]
+
+        output_decoding = hk.Linear(num_symbols) 
+
+        if train_forced: # train decoding w/ teacher forcing
+            encoder_inputs = output_embedding(oh_targets[:, :-1, :])
+            encoder_inputs = jnp.concatenate(
+                [start_token,
+                 encoder_inputs], axis=1)  
+            results = encoder_inputs
+            for decoder_layer in decoder_layers:
+                results = decoder_layer(encoder_outputs=encoder_outputs,
+                                        inputs=results)
+
+            output_logits = output_decoding(results)
+            hard_outputs = jnp.argmax(output_logits, axis=-1)
+
+        else: # not train_forced, eval decoding (one step at a time) 
+            encoder_inputs = start_token 
+
+            output_logits = []
+            hard_outputs = []
+            for output_step_i in range(self.output_seq_length):
+                results = encoder_inputs 
+                for decoder_layer in decoder_layers:
+                    results = decoder_layer(encoder_outputs=encoder_outputs,
+                                            inputs=results)
+
+                this_output_logits = output_decoding(results[:, -1:, :])
+                this_hard_output = jnp.argmax(this_output_logits, axis=-1)
+                output_logits.append(this_output_logits)
+                hard_outputs.append(this_hard_output)
+                
+                # cue next with previous output
+                this_encoded_hard_output = jax.nn.one_hot(
+                    this_hard_output, num_classes=num_symbols) 
+                this_encoded_hard_output = output_embedding(
+                    this_encoded_hard_output)
+#                this_encoded_hard_output = jnp.expand_dims(
+#                    this_encoded_hard_output, axis=1)
+                encoder_inputs = jnp.concatenate(
+                    [encoder_inputs,
+                     this_encoded_hard_output], axis=1)  
+
+            output_logits = jnp.concatenate(output_logits, axis=1)
+            hard_outputs = jnp.concatenate(hard_outputs, axis=1)
+
+        if targets is not None:
+            loss = softmax_xe(output_logits, oh_targets)
+            print(loss.shape)
+            total_loss = jnp.mean(jnp.sum(loss, axis=-1))
+            accuracy = jnp.mean(hard_outputs == targets) 
+
+            return {"outputs": hard_outputs, 
+                    "loss": total_loss, 
+                    "accuracy": accuracy} 
+        else: 
+            return {"outputs": hard_outputs} 
 
 
 if __name__ == "__main__":
@@ -134,6 +260,8 @@ if __name__ == "__main__":
         "num_heads": 4,
         "num_encoder_layers": 3,
         "num_decoder_layers": 3,
+        "num_symbols": num_ints,
+        "output_seq_length": seq_length,
     }
     #### 
 
@@ -144,16 +272,35 @@ if __name__ == "__main__":
         num_ints=num_ints,
         seq_length=seq_length)
 
-    batch_inputs = dataset["train"]["inputs"][:5]
-
-    def model_forward_fn(inputs):
+    def model_forward_fn(batch):
+        inputs = batch["inputs"]
+        targets = batch["targets"] if "targets" in batch else None 
+        train_forced = batch["train_forced"] if "train_forced" in batch else True 
         model = AndrewsTransformer(transformer_config=transformer_config) 
-        return model(inputs)
+        return model(inputs=inputs, targets=targets, train_forced=train_forced)
 
     forward = hk.transform(model_forward_fn)
-    params = forward.init(rng, batch_inputs)
+
+    # get a sample batch
+    batch_inputs = dataset["train"]["inputs"][:5]
+    batch_targets = dataset["train"]["outputs"][:5]
+    batch = {"inputs": batch_inputs,
+             "targets": batch_targets}
+
+    # initialize
+    params = forward.init(rng, batch)
     print(params.keys())
-    results = forward.apply(params, None, batch_inputs)
+
+    # train pass 
+    results = forward.apply(params, None, batch)
     print(results)
-    print(results.shape)
     
+    # train pass 
+    batch["train_forced"] = False
+    results = forward.apply(params, None, batch)
+    print(results)
+
+    # generation pass (no targets)
+    del batch["targets"]
+    results = forward.apply(params, None, batch)
+    print(results)
