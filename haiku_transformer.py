@@ -149,7 +149,8 @@ class AndrewsTransformer(hk.Module):
         self.num_decoder_layers = transformer_config["num_decoder_layers"]
         self.output_seq_length = transformer_config["output_seq_length"]
 
-    def __call__(self, inputs, targets=None, train_forced=True):
+    def __call__(self, inputs, targets=None, train_forced=True,
+                 return_bare_loss=False):
         dimensionality = self.dimensionality
         num_symbols = self.num_symbols
         batch_size, input_seq_length = inputs.shape
@@ -235,8 +236,11 @@ class AndrewsTransformer(hk.Module):
 
         if targets is not None:
             loss = softmax_xe(output_logits, oh_targets)
-            print(loss.shape)
             total_loss = jnp.mean(jnp.sum(loss, axis=-1))
+
+            if return_bare_loss:
+                return total_loss
+
             accuracy = jnp.mean(hard_outputs == targets) 
 
             return {"outputs": hard_outputs, 
@@ -246,23 +250,33 @@ class AndrewsTransformer(hk.Module):
             return {"outputs": hard_outputs} 
 
 
+def sgd(params, grads, lr):
+    return params - lr * grads
+
+
 if __name__ == "__main__":
     #### Params
     # dataset
     num_ints = 11
-    seq_length = 7
+    seq_length = 9
     num_train = 1000
     num_test = 100
 
     # architecture
     transformer_config = {
-        "dimensionality": 128,
+        "dimensionality": 512,
         "num_heads": 4,
         "num_encoder_layers": 3,
         "num_decoder_layers": 3,
         "num_symbols": num_ints,
         "output_seq_length": seq_length,
     }
+
+    # training
+    learning_rate = 3e-4
+    num_epochs = 1000
+    batch_size = 20 
+
     #### 
 
     rng = jax.random.PRNGKey(0)
@@ -276,8 +290,13 @@ if __name__ == "__main__":
         inputs = batch["inputs"]
         targets = batch["targets"] if "targets" in batch else None 
         train_forced = batch["train_forced"] if "train_forced" in batch else True 
+        return_bare_loss = batch["return_bare_loss"] if "return_bare_loss" in batch else False 
         model = AndrewsTransformer(transformer_config=transformer_config) 
-        return model(inputs=inputs, targets=targets, train_forced=train_forced)
+        return model(inputs=inputs, targets=targets, train_forced=train_forced,
+                     return_bare_loss=return_bare_loss)
+
+    def this_sgd(params, grads):
+        return sgd(params, grads, lr=learning_rate)
 
     forward = hk.transform(model_forward_fn)
 
@@ -291,6 +310,7 @@ if __name__ == "__main__":
     params = forward.init(rng, batch)
     print(params.keys())
 
+    ## testing the code
     # train pass 
     results = forward.apply(params, None, batch)
     print(results)
@@ -300,7 +320,40 @@ if __name__ == "__main__":
     results = forward.apply(params, None, batch)
     print(results)
 
+    # loss only pass (to avoid training wrappers
+    batch["return_bare_loss"] = True 
+    results = forward.apply(params, None, batch)
+    print(results)
+
     # generation pass (no targets)
     del batch["targets"]
     results = forward.apply(params, None, batch)
     print(results)
+
+    ## train the model
+    num_batches = np.ceil(float(num_train) / batch_size).astype(np.int32) 
+    for epoch_i in range(num_epochs):
+        # train
+        for batch_i in range(num_batches): 
+            batch_start = batch_size * batch_i 
+            batch_inputs = dataset["train"]["inputs"][batch_start:batch_start + batch_size]
+            batch_targets = dataset["train"]["outputs"][batch_start:batch_start + batch_size]
+            batch = {"inputs": batch_inputs,
+                     "targets": batch_targets,
+                     "return_bare_loss": True}
+
+            grads = jax.grad(forward.apply)(params, None, batch)
+            params = jax.tree_multimap(this_sgd, params, grads)
+
+
+        # eval
+        batch_inputs = dataset["test"]["inputs"]
+        batch_targets = dataset["test"]["outputs"]
+        batch = {"inputs": batch_inputs,
+                 "targets": batch_targets,
+                 "train_forced": False}
+
+        results = forward.apply(params, None, batch)
+        print("Epoch {}, loss: {}, accuracy: {}".format(
+            epoch_i, results["loss"], results["accuracy"]))
+        print(results["outputs"][:5], batch["targets"][:5])
