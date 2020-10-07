@@ -10,14 +10,14 @@ def softmax_xe(logits, labels):
 
 
 def positional_encodings(length, dimensionality, constant_fac=1000):
-    positions = jnp.arange(length, dtype=jnp.float32)
-    constants = (2./dimensionality) * (jnp.arange(dimensionality, dtype=jnp.float32) // 2.)
-    constants = 1./jnp.exp(constants * jnp.log(constant_fac))
-    offsets = jnp.zeros_like(constants)
-    offsets = jax.ops.index_update(offsets, jax.ops.index[::2], jnp.pi / 2.)  # sin -> cos 
-    encodings = jnp.outer(positions, constants)
+    positions = np.arange(length, dtype=np.float32)
+    constants = (2./dimensionality) * (np.arange(dimensionality, dtype=np.float32) // 2.)
+    constants = 1./np.exp(constants * np.log(constant_fac))
+    offsets = np.zeros_like(constants)
+    offsets[::2] += np.pi / 2.  # sin -> cos
+    encodings = np.outer(positions, constants)
     encodings += offsets
-    encodings = jnp.sin(encodings)
+    encodings = np.sin(encodings)
     return encodings
 
 
